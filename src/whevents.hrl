@@ -1,0 +1,1 @@
+-record(market_created, { name, user, description } ).

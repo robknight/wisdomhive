@@ -1,0 +1,8 @@
+User -> Facade: Order to buy maximum of N\n contracts at maximum P price
+Facade -> Account: Request for appropriate funds
+note right of Account: Depending on current prices,\nAccount allocates funds for trading,\npossibly reducing order qty
+Account -> Market: Modified order with max funds
+note right of Market: Trade occurs
+Market -> Account: Left-over funds returned
+Market -> Facade: Notification of trade
+Facade -> User: Trade completed

@@ -1,0 +1,128 @@
+Notes
+=====
+
+ARCHITECTURE
+
+One possibility is to adopt an object-oriented design approach, with the notion
+that each object instance equates to a single Erlang process. However, this
+could lead to the creation of a very large number of processes for relatively
+little gain; there seems to be little point in creating a process for a
+Contract, for example.
+
+We can improve this approach by borrowing some concepts from Domain-Driven
+Design - specifically the concept of Aggregates and Entities. In DDD, an
+Aggregate is a collection of objects managed by a master object, the Aggregate
+Root. The other objects within the system can be Entities (objects which have
+identity) or Values (which do not).
+
+This means that we only need processes for our Aggregate Roots. ARs for our
+system will probably be: -
+
+	* Market
+	* Account
+
+Since each AR will be represented by a single process and ARs are also
+responsible for managing their own state, any modifications to object state made
+within an AR will be automatically thread-safe without needing a transactional
+memory system (e.g. a Mnesia database). This does mean that, for an individual
+market, all operations will be serialized, but this is a price worth paying.
+Obviously, we could design the system differently, such that we do not bind
+objects to processes and allow any process to initiate a transaction involving
+an object (or the database entry representing its state, at least). However,
+this will necessitate a) locking of table entries and b) distributed
+transactions which may end up performing worse.
+
+A second important aspect here is CQS, Command/Query Separation. Basically,
+there is a fundamental difference between Commands, which change the state of
+the system, and queries, which do not. Commands are issued to objects
+(processes) which validate those commands based on their own (100% accurate)
+knowledge of their own state. Since commands are processed serially, they are
+always operating on an object that is guaranteed to be fully consistent and
+up-to-date.
+
+Queries, however, can often tolerate eventual consistency. Provided that the
+data retrieved by queries is valid, it does not matter if it is slightly
+out-of-date or even inconsistent with data available from other parts of the
+system. If a query to display price information is slightly out-of-date this
+does not matter; only the *writing* side of the system needs accurate,
+consistent data to operate. The part which simply provides data to the client
+for display can utilise slightly old data - though, of course, it should be no
+older than necessary.
+
+This means that the objects/processes we discussed earlier do not have 'getter'
+methods as such. In fact, we will use an entirely different system for getting
+information out of the objects, compared to how we put the information in. We
+change object state by sending the object a message. Whenever a message is
+processed, the object triggers an event which is sent to a separate process
+(which may reside on a separate physical node). This process then updates our
+data store with the new information. The 'reading' data store can be fully
+denormalized and widely distributed to as many nodes as are necessary to ensure
+performance. Since reads are much more common than writes in many systems, this
+works well.
+
+Another important point is the role of events. Events are just a certain type of
+message that can be sent between objects. Events are important because they
+allow a process to do something else whilst waiting for another process to
+operate. For example, a Market object might receive a Buy Order from a
+particular User. The cost of completing the Buy Order might be $500, so the
+Market must request those funds from the User. But requesting funds from the
+User will take time - for example, the time taken to complete a database
+transaction. A faster approach may be for the Market to notify the User that the
+funds are required. The Market can then go on processing other inputs until the
+User object has replied stating that the funds are (or are not) available.
+
+The Market does not need to know anything about the internal state of the User,
+it merely sends the User a message stating that funds are required, and the User
+decides what to do about it.
+
+One possibility is to avoid storing the state of the market at all, or to have
+certain elements of the state of the market not stored. For example, current
+prices in the marketplace do not need to be stored within the Market aggregate
+itself, because the price can be derived from other variables (quantities of
+contracts purchased). In fact, most of the state of an object can be represented
+as lists of orders - historical data about trades that have taken place. In this
+case, modifying a Market is purely an *additive* operation, such that no data is
+ever destroyed and it is never necessary to lock the object. This would mean
+that certain operations can be carried out in parallel, entirely asynchronously.
+Is this true for all operations that can be carried out on the market? What are
+the consequences of having some operations that can be parallelised and others
+that, perhaps, cannot? It is worth pointing out that the operation of placing an
+order on a market is by far the most common operation that will be carried out.
+Potentially destructive operations that change the state of the Market are rare
+and can be restricted to certain examples, for example setting or changing the
+closing date of the market, its name, description or other metadata. It is
+possible to make a case that once a market is active, these changes should not
+be allowed at all. It is also hard to imagine how applying eventual consistency
+to these changes will cause any kind of problem.
+
+WHAT HAPPENS WHEN A TRADE ORDER ARRIVES
+=======================================
+
+When an order to trade arrives, the receiving thread first checks the validity
+of the order. For example, the price must be below the MAX_PRICE constant, and
+the quantity must be greater than zero.
+
+Assuming that the order is well-formed, it is then sent as a message to the
+process responsible for that market. At this point, the calculation about what
+to do as a result of the order occurs. The outcome of the order will vary
+depending on the state of the market at the moment of processing. The prices of
+the contracts traded on the market will determine the price paid or received by
+the buyer or seller and may affect the quantity of shares traded, depending on
+the min/max price specified by the trader.
+
+The simplest implementation here is to make this a synchronous, transactional
+operation. If we have a single process responsible for the market then, by
+definition, the processing of orders will be serial in nature and there will be
+no need to worry about thread-safety.
+
+Upon receiving a 'buy' order, the first thing that happens is that the market
+will raise an 'order placed' event. Then, the market will attempt to satisfy the
+order. Let us imagine that the order is for a maximum of 5000 shares at a price
+at or below 65. Due to the pre-existing prices, only 3000 shares can be
+purchased at or below the maximum price, so a 'trade' event occurs. Our event
+log will show an 'order placed' event followed by a 'trade' event.
+
+There is a question about what to do with the unfulfilled portion of the order
+which may, in some cases, constitute the entire order. It seems to make sense to
+me that the order should remain on the book until fulfilled or cancelled, though
+this does slightly increase the complexity of the system.
