@@ -4,3 +4,4 @@
 -record(create_market, { market_name, user, description }).
 -record(open_market, { market_name, user }).
 -record(close_market, { market_name, user }).
+-record(create_account, { user }).

@@ -1,0 +1,332 @@
+-module(whmarket).
+
+-include("whrecords.hrl").
+-include("wh_commands.hrl").
+
+%-compile(export_all).
+
+-define(MSR_B, 100).
+-define(MAX_PRICE, 100).
+ 
+-export([
+         create_contract/1,
+         buy/1,
+         sell/1,
+         create_market/1,
+         create_account/1,
+         open_market/1,
+         close_market/1
+       ]).
+       
+-export([create_tables/0]).
+       
+
+%% UTILITY FUNCTIONS %%
+
+create_tables() ->
+  mnesia:create_table(market,  [{disc_copies, [node()]}, {attributes, record_info(fields, market)}]),
+  mnesia:create_table(account, [{disc_copies, [node()]}, {attributes, record_info(fields, account)}]).
+
+
+get_market(Name) ->
+  F = fun() ->
+    case mnesia:read({ market, Name }) of
+      [] ->
+        { error, market_not_found };
+      [ Market|_T ] ->
+        { ok, Market }
+    end
+  end,
+  
+  Result = mnesia:transaction(F),
+  case Result of
+    { aborted, Reason } ->
+      { error, Reason };
+    { atomic, Val } ->
+      Val
+  end.
+
+get_account(Owner) ->
+  F = fun() ->
+    case mnesia:read({ account, Owner }) of
+      [] ->
+        { error, account_not_found };
+      [ Account|_T ] ->
+        { ok, Account }
+    end
+  end,
+  
+  Result = mnesia:transaction(F),
+  case Result of
+    { aborted, Reason } ->
+      { error, Reason };
+    { atomic, Val } ->
+      Val
+  end.
+  
+contract_exists([C|T], Name) ->
+  CName = C#contract.name,
+  case CName of
+    Name ->
+      true;
+    _ ->
+      contract_exists(T, Name)
+  end;
+  
+contract_exists([], _Name) ->
+  false.
+
+add_contract(List, #contract{ name = Name } = Contract) ->
+  case contract_exists(List, Name) of
+    true ->
+      { error, contract_already_exists };
+    false ->
+      { ok, update_prices([Contract|List]) }
+  end.
+
+
+%% PRICE CALCULATION %%
+
+% possible optimisation here
+% we could cache the result of sum_powers (for all contracts in market) in the database
+% when buying a contract, calculate sum_powers for that individual contract
+% subtract that from the cached value, and add on the new value (with quantity +/- N)
+% this would save having to loop through the list twice when updating prices
+% (once for the sum_powers() calculation and again to update list)
+update_prices(List) ->
+  S = sum_powers(List),
+  update_prices(List, S).
+
+update_prices([C|T], SumPowers) ->
+  Quantity = C#contract.quantity,
+  NewPrice = 100 * math:exp(Quantity/?MSR_B) / SumPowers,
+  NewC = C#contract{ price=NewPrice },
+  [NewC|update_prices(T, SumPowers)];
+
+update_prices([], _) ->
+  [].
+
+sum_powers([C|T]) ->
+  Quantity = C#contract.quantity,
+  math:exp(Quantity/?MSR_B) + sum_powers(T);
+
+sum_powers([]) ->
+  0.
+
+%% Public Interface %%
+
+%% COMMANDS %%
+
+% All commands are forwarded to the gen_server process for the market in
+% question.
+
+% At this stage, we can expect that all of the inputs will be well-formed
+% records, with all of the required fields present.  However, they contents
+% of the records may not be valid.  Here we are concerned only with invariants -
+% making sure that the record does not violate some "eternal" rule.
+%
+% Context-sensitive rules will be applied by the market gen_server process at
+% the last possible moment.
+
+% Create Contract Command
+% Parameters:
+% market_name     The name of the market
+%                 Must be a string (list)
+% contract_name   Name of the contract to create
+%                 Must be a string (list)
+% user            JID of the user
+%                 Must be a string (list)
+% description     Brief description of the contract
+%                 Must be a string (list)
+
+create_contract(Command) when
+  not is_list(Command#create_contract.market_name);
+  not is_list(Command#create_contract.contract_name);
+  not is_list(Command#create_contract.user);
+  not is_list(Command#create_contract.description) ->
+    { error, badly_formed };
+
+create_contract(#create_contract{market_name = MarketName, contract_name = ContractName,
+user = User, description = Description } = Command) ->
+  F = fun() ->
+    case get_market(MarketName) of
+      { ok, Market } ->
+        case Market#market.status of
+          open ->
+            mnesia:abort({ error, market_is_open });
+          closed ->
+            Contract = #contract{ name =  ContractName, description = Description },
+            case add_contract(Market#market.contracts, Contract) of
+              { ok, NewContractList } ->
+                NewMarket = Market#market { contracts = NewContractList },
+                mnesia:write(NewMarket);
+              Error ->
+                mnesia:abort(Error)
+            end
+        end;
+      Error ->
+        mnesia:abort(Error)
+    end
+  end,
+  mnesia:transaction(F).
+
+
+% Buy Command
+% Parameters:
+% quantity        The maximum quantity of a contract to buy, subject to funds
+%                 being available.
+%                 Must be > 0.
+% max_price       The highest price the buyer is willing to pay
+%                 Must be > 0 and < ?MAX_PRICE
+% market_name     Name of the market (and thus of the gen_server process)
+%                 Must be a string (list)
+% contract_name   Name of the contract to buy
+%                 Must be a string (list)
+% user            JID of the user
+%                 Must be a string (list)
+
+% The Market Process will do further checking, e.g. to ensure that the named
+% contract actually exists
+
+buy(Command) when
+  not is_list(Command#buy.contract_name);
+  not is_list(Command#buy.market_name);
+  not is_number(Command#buy.quantity);
+  not is_number(Command#buy.max_price);
+  not is_list(Command#buy.user) ->
+    { error, badly_formed };
+
+buy(#buy{quantity = Quantity}) when Quantity == 0 ->
+  { error, quantity_is_zero };
+
+buy(#buy{max_price = MaxPrice}) when MaxPrice == 0 ->
+  { error, max_price_is_zero };
+
+buy(#buy{max_price = MaxPrice}) when MaxPrice > ?MAX_PRICE ->
+  { error, max_price_too_high };
+
+buy(#buy{market_name = MarketName} = Command) ->
+  gen_server:call(MarketName, Command).
+  
+% Sell Command
+% All details identical to the Buy command, except:
+% min_price instead of max_price
+
+% TODO: consider renaming sell/buy to sell_order/buy_order or something similar
+% to reflect asynchronous nature
+
+sell(Command) when
+  not is_list(Command#sell.contract_name);
+  not is_list(Command#sell.market_name);
+  not is_number(Command#sell.quantity);
+  not is_number(Command#sell.min_price);
+  not is_list(Command#sell.user) ->
+    { error, badly_formed };
+
+sell(#sell{quantity = Quantity}) when Quantity == 0 ->
+  { error, quantity_is_zero };
+
+sell(#sell{min_price = MinPrice}) when MinPrice == 0 ->
+  { error, min_price_is_zero };
+
+sell(#sell{min_price = MinPrice}) when MinPrice > ?MAX_PRICE ->
+  { error, min_price_too_high };
+
+sell(#sell{market_name = MarketName} = Command) ->
+  gen_server:call(MarketName, Command).
+  
+% Create Market Command
+% Parameters:
+% market_name         Name of the newly-created market
+%                     Must be a string (list)
+% user                JID of the user
+%                     Must be a string (list)
+% description         Description of the market
+%                     Must be a string (list)
+
+create_market(Command) when
+  not is_list(Command#create_market.market_name);
+  not is_list(Command#create_market.user);
+  not is_list(Command#create_market.description) ->
+    { error, badly_formed };
+
+create_market(#create_market{market_name = MarketName, user = User } = Command) ->
+  F = fun() ->
+    case get_market(MarketName) of
+      { error, market_not_found } ->
+        Market = #market{ name = MarketName, created_date = erlang:now(), creator = User },
+        mnesia:write(Market);
+      _ ->
+        mnesia:abort(market_already_exists)
+    end
+  end,
+  mnesia:transaction(F).
+  
+% Create Account Command
+% Parameters:
+% user          JID of the account owner
+%               Must be a string (list)
+
+create_account(Command) when
+  not is_list(Command#create_account.user) ->
+  { error, badly_formed };
+
+create_account(#create_account{ user = Owner } = Command) ->
+  F = fun() ->
+    case get_account(Owner) of
+      { error, account_not_found } ->
+        Account = #account{ owner = Owner, balance = 10000, created_date = erlang:now(), portfolio = []},
+        mnesia:write(Account);
+      { error, Reason } ->
+        mnesia:abort(Reason);
+      _ ->
+        mnesia:abort(account_already_exists)
+    end
+  end,
+  mnesia:transaction(F).
+  
+% Open Market Command
+% Parameters
+% market_name         Name of the market
+%                     Must be a string (list)
+% user                JID of the user
+%                     Must be a string (list)
+
+open_market(Command) when
+  not is_list(Command#open_market.user);
+  not is_list(Command#open_market.market_name) ->
+    { error, badly_formed };
+
+open_market(#open_market{ market_name = MarketName, user = User }) ->
+  change_status(MarketName, User, open).
+
+change_status(MarketName, User, NewStatus) ->
+  F = fun() ->
+    case get_market(MarketName) of
+      { error, Reason } ->
+        mnesia:abort(Reason);
+      { ok, Market } when Market#market.creator =/= User ->
+        mnesia:abort({ error, no_permission });
+      { ok, Market } when Market#market.status =:= NewStatus ->
+        mnesia:abort({ error, no_change });
+      { ok, Market } ->
+        NewMarket = Market#market{ status = NewStatus },
+        mnesia:write(NewMarket)
+    end 
+  end,
+  mnesia:transaction(F).
+  
+% Close Market Command
+% Parameters
+% market_name         Name of the market
+%                     Must be a string(list)
+% user                JID of the user
+%                     Must be a string(list)
+
+close_market(Command) when
+  not is_list(Command#close_market.market_name);
+  not is_list(Command#close_market.user) ->
+    { error, badly_formed };
+
+close_market(#close_market{ market_name = MarketName, user = User }) ->
+  change_status(MarketName, User, closed).
