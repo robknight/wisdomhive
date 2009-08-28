@@ -3,7 +3,7 @@
 -include("whrecords.hrl").
 -include("wh_commands.hrl").
 
-%-compile(export_all).
+-compile(export_all).
 
 -define(MSR_B, 100).
 -define(MAX_PRICE, 100).
@@ -76,6 +76,17 @@ contract_exists([C|T], Name) ->
 contract_exists([], _Name) ->
   false.
 
+get_contract([C|T], Name) ->
+  case C#contract.name of
+    Name ->
+      C;
+    _ ->
+      get_contract(T, Name)
+  end;
+
+get_contract([], _Name) ->
+  false.
+
 add_contract(List, #contract{ name = Name } = Contract) ->
   case contract_exists(List, Name) of
     true ->
@@ -112,6 +123,63 @@ sum_powers([C|T]) ->
 
 sum_powers([]) ->
   0.
+
+cost_at_quantity(ContractList, ContractName, Quantity) ->
+  F = fun(C) ->
+    case C#contract.name of
+      ContractName ->
+        C#contract{ quantity=C#contract.quantity + Quantity };
+      _ ->
+        C
+    end
+  end,
+  NewList = lists:map(F, ContractList),
+  S = sum_powers(NewList),
+  math:log(S) * ?MSR_B.
+
+% This function calculates the cost of altering the quantity of a contract by
+% Quantity (positive for buying, negative for selling)
+cost_to_trade(ContractList, ContractName, Quantity) ->
+  100 * (cost_at_quantity(ContractList, ContractName, Quantity) - cost_at_quantity(ContractList, ContractName, 0)).
+
+
+% This function determines how many contracts need to be bought or sold in order
+% to drive the price for the contract to Price
+% The return value is positive if contracts should be bought, negative if they
+% should be sold
+% WARNING: return value will not be a whole integer and should be rounded
+% accordingly by the calling function
+quantity_for_price(ContractList, ContractName, Price) ->
+  Contract = get_contract(ContractList, ContractName),
+  Prob = Price / 100,
+  F = fun(C) ->
+    case C#contract.name of
+      ContractName ->
+        0;
+      _ ->
+        Prob * math:exp(C#contract.quantity / ?MSR_B)
+      end
+  end,
+  D = lists:sum(lists:map(F, ContractList)),
+  Res = math:log((D/(1-Prob))) * ?MSR_B,
+  Res - Contract#contract.quantity.
+
+% This function determines how many contracts can be bought for the specified
+% sum.
+quantity_for_sum(ContractList, ContractName, Sum) ->
+  OldCost = cost_at_quantity(ContractList, ContractName, 0),
+  N = math:exp((OldCost + (Sum / 100)) / ?MSR_B),
+  Contract = get_contract(ContractList, ContractName),
+  F = fun(C) ->
+    case C#contract.name of
+      ContractName ->
+        0;
+      _ ->
+        math:exp(C#contract.quantity / ?MSR_B)
+    end
+  end,
+  Qty = ?MSR_B * math:log(N - lists:sum(lists:map(F, ContractList))),
+  Qty - Contract#contract.quantity.
 
 %% Public Interface %%
 
@@ -185,9 +253,6 @@ user = User, description = Description } = Command) ->
 % user            JID of the user
 %                 Must be a string (list)
 
-% The Market Process will do further checking, e.g. to ensure that the named
-% contract actually exists
-
 buy(Command) when
   not is_list(Command#buy.contract_name);
   not is_list(Command#buy.market_name);
@@ -202,11 +267,21 @@ buy(#buy{quantity = Quantity}) when Quantity == 0 ->
 buy(#buy{max_price = MaxPrice}) when MaxPrice == 0 ->
   { error, max_price_is_zero };
 
-buy(#buy{max_price = MaxPrice}) when MaxPrice > ?MAX_PRICE ->
+buy(#buy{max_price = MaxPrice}) when MaxPrice >= ?MAX_PRICE ->
   { error, max_price_too_high };
 
-buy(#buy{market_name = MarketName} = Command) ->
-  gen_server:call(MarketName, Command).
+buy(#buy{market_name = MarketName, user = User, contract_name = ContractName } = Command) ->
+  F = fun() ->
+    Account = get_account(User),
+    Market = get_market(MarketName),
+%    case contract_exists(Market#market.contracts, ContractName) of
+%      true ->
+%        
+%      false ->
+%    end
+    false
+  end,
+  mnesia:transaction(F).
   
 % Sell Command
 % All details identical to the Buy command, except:
