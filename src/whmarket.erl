@@ -392,9 +392,61 @@ sell(#sell{min_price = MinPrice}) when MinPrice == 0 ->
 sell(#sell{min_price = MinPrice}) when MinPrice > ?MAX_PRICE ->
   { error, min_price_too_high };
 
-sell(#sell{market_name = MarketName} = Command) ->
-  gen_server:call(MarketName, Command).
-  
+% Possible TODOs:
+% What happens if Market doesn't exist?
+% Consider re-working using exceptions
+sell(#sell{market_name = MarketName, user = User, contract_name = ContractName,
+quantity = Quantity, min_price = MinPrice } = Command) ->
+  F = fun() ->
+    Account = get_account(User),
+    Market = get_market(MarketName),
+    ContractList = Market#market.contracts,
+    case get_portfolio_entry(Account#account.portfolio, MarketName, ContractName) of
+      false ->
+        mnesia:abort(no_contracts_to_sell);
+      PortfolioEntry when PortfolioEntry#portfolio_entry.quantity == 0 ->
+        mnesia:abort(no_contracts_to_sell);
+      PortfolioEntry ->
+        case get_contract(Market#market.contracts, ContractName) of
+          false ->
+            mnesia:abort(contract_does_not_exist);
+          Contract when MinPrice >= Contract#contract.price ->
+            mnesia:abort(min_price_too_high);
+          Contract ->
+            Balance = Account#account.balance,
+            SaleQuantity = 0 - quantity_to_sell(ContractList, ContractName, Quantity, MinPrice, PortfolioEntry),
+            if
+              SaleQuantity > -1 ->
+                mnesia:abort(demand_fail);  % possibly need a better error name
+              true ->
+                Revenue = 0 - cost_to_trade(ContractList, ContractName, SaleQuantity),
+                NewPortfolio = add_to_portfolio(MarketName, ContractName, SaleQuantity, Account#account.portfolio),
+                NewAccount = Account#account{ balance = Balance + Revenue, portfolio = NewPortfolio },
+                NewContractList = update_prices(change_contract_quantity(Market#market.contracts, ContractName, SaleQuantity)),
+                NewMarket = Market#market{ contracts = NewContractList },
+                mnesia:write(NewAccount),
+                mnesia:write(NewMarket)
+            end
+        end
+    end
+  end,
+  mnesia:transaction(F).
+
+quantity_to_sell(ContractList, ContractName, MaxQuantity, MinPrice, PortfolioEntry) ->
+  QtyToSell = if
+    MaxQuantity > PortfolioEntry#portfolio_entry.quantity ->
+      PortfolioEntry#portfolio_entry.quantity;
+    true ->
+      MaxQuantity
+  end,
+  QtyForPrice = 0 - quantity_for_price(ContractList, ContractName, MinPrice),
+  if
+    QtyToSell > QtyForPrice ->
+      QtyForPrice;
+    true ->
+      QtyToSell
+  end.
+
 % Create Market Command
 % Parameters:
 % market_name         Name of the newly-created market
