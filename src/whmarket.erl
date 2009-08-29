@@ -32,9 +32,9 @@ get_market(Name) ->
   F = fun() ->
     case mnesia:read({ market, Name }) of
       [] ->
-        { error, market_not_found };
+        mnesia:abort(market_not_found);
       [ Market|_T ] ->
-        { ok, Market }
+        Market
     end
   end,
   
@@ -50,9 +50,9 @@ get_account(Owner) ->
   F = fun() ->
     case mnesia:read({ account, Owner }) of
       [] ->
-        { error, account_not_found };
+        mnesia:abort(account_not_found);
       [ Account|_T ] ->
-        { ok, Account }
+        Account
     end
   end,
   
@@ -94,6 +94,59 @@ add_contract(List, #contract{ name = Name } = Contract) ->
     false ->
       { ok, update_prices([Contract|List]) }
   end.
+
+change_contract_quantity([C|ContractList], ContractName, Change) ->
+  case C#contract.name of
+    ContractName ->
+      NewC = C#contract{ quantity = C#contract.quantity + Change },
+      [NewC|ContractList];
+    _ ->
+      [C|change_contract_quantity(ContractList, ContractName, Change)]
+  end;
+
+change_contract_quantity([], ContractName, Change) ->
+  [].
+
+get_portfolio_entry([PE|Portfolio], MarketName, ContractName) ->
+  case { PE#portfolio_entry.market_name, PE#portfolio_entry.contract_name } of
+    { MarketName, ContractName} ->
+      PE;
+    _ ->
+      get_portfolio_entry(Portfolio, MarketName, ContractName)
+  end;
+
+get_portfolio_entry([], MarketName, ContractName) ->
+  [].
+
+%% TRADING  %%
+
+add_to_portfolio(MarketName, ContractName , Quantity, [PE|Portfolio]) ->
+  { portfolio_entry, M, C, Qty } = PE,
+  case { M, C } of
+    { MarketName, ContractName } ->
+      NewPE = PE#portfolio_entry{ quantity = Qty + Quantity },
+      [NewPE|Portfolio];
+    _ ->
+      [PE|add_to_portfolio(MarketName, ContractName, Quantity, Portfolio)]
+  end;
+
+add_to_portfolio(MarketName, ContractName, Quantity, []) ->
+  NewPE = #portfolio_entry{ market_name = MarketName, contract_name = ContractName, quantity = Quantity },
+  [NewPE].
+
+floor(X) ->
+    T = trunc(X),
+    case X - T == 0 of
+        true -> T;
+        false -> T - 1
+    end.
+
+ceiling(X) ->
+    T = trunc(X),
+    case X - T == 0 of
+        true -> T;
+        false -> T + 1
+    end.
 
 
 %% PRICE CALCULATION %%
@@ -180,6 +233,8 @@ quantity_for_sum(ContractList, ContractName, Sum) ->
   end,
   Qty = ?MSR_B * math:log(N - lists:sum(lists:map(F, ContractList))),
   Qty - Contract#contract.quantity.
+  
+
 
 %% Public Interface %%
 
@@ -270,25 +325,55 @@ buy(#buy{max_price = MaxPrice}) when MaxPrice == 0 ->
 buy(#buy{max_price = MaxPrice}) when MaxPrice >= ?MAX_PRICE ->
   { error, max_price_too_high };
 
-buy(#buy{market_name = MarketName, user = User, contract_name = ContractName } = Command) ->
+buy(#buy{market_name = MarketName, user = User, contract_name = ContractName,
+quantity = Quantity, max_price = MaxPrice } = Command) ->
   F = fun() ->
     Account = get_account(User),
     Market = get_market(MarketName),
-%    case contract_exists(Market#market.contracts, ContractName) of
-%      true ->
-%        
-%      false ->
-%    end
-    false
+    ContractList = Market#market.contracts,
+    case get_contract(Market#market.contracts, ContractName) of
+      false ->
+        mnesia:abort(contract_does_not_exist);
+      Contract when MaxPrice =< Contract#contract.price ->
+        mnesia:abort(max_price_too_low);
+      Contract ->
+        Balance = Account#account.balance,
+        AffordableMax = quantity_to_buy(ContractList, ContractName, Quantity, MaxPrice, Balance),
+        if
+          AffordableMax < 1 ->
+            mnesia:abort(insufficient_funds);
+          true ->
+            Cost = cost_to_trade(ContractList, ContractName, AffordableMax),
+            NewPortfolio = add_to_portfolio(MarketName, ContractName, AffordableMax, Account#account.portfolio),
+            NewAccount = Account#account{ balance = Balance - Cost, portfolio = NewPortfolio },
+            NewContractList = update_prices(change_contract_quantity(Market#market.contracts, ContractName, AffordableMax)),
+            NewMarket = Market#market{ contracts = NewContractList },
+            mnesia:write(NewAccount),
+            mnesia:write(NewMarket)
+        end
+    end
   end,
   mnesia:transaction(F).
+  
+quantity_to_buy(ContractList, ContractName, MaxQuantity, MaxPrice, Balance) ->
+  QFP = floor(quantity_for_price(ContractList, ContractName, MaxPrice)),
+  RealMax = if
+    QFP > MaxQuantity ->
+      MaxQuantity;
+    true ->
+      QFP
+  end,
+  Cost = cost_to_trade(ContractList, ContractName, RealMax),
+  if
+    Cost > Balance ->
+      floor(quantity_for_sum(ContractList, ContractName, Balance));
+    true ->
+      RealMax
+  end.
   
 % Sell Command
 % All details identical to the Buy command, except:
 % min_price instead of max_price
-
-% TODO: consider renaming sell/buy to sell_order/buy_order or something similar
-% to reflect asynchronous nature
 
 sell(Command) when
   not is_list(Command#sell.contract_name);
