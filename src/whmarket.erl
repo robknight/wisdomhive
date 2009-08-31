@@ -248,8 +248,32 @@ quantity_for_sum(ContractList, ContractName, Sum) ->
 % of the records may not be valid.  Here we are concerned only with invariants -
 % making sure that the record does not violate some "eternal" rule.
 %
-% Context-sensitive rules will be applied by the market gen_server process at
-% the last possible moment.
+
+execute(Command) when is_record(Command, buy) ->
+  buy(Command);
+
+execute(Command) when is_record(Command, sell) ->
+  sell(Command);
+  
+execute(Command) when is_record(Command, create_contract) ->
+  create_contract(Command);
+
+execute(Command) when is_record(Command, create_market) ->
+  create_market(Command);
+
+execute(Command) when is_record(Command, create_account) ->
+  create_account(Command);
+
+execute(Command) when is_record(Command, open_market) ->
+  open_market(Command);
+  
+execute(Command) when is_record(Command, close_market) ->
+  close_market(Command);
+  
+execute(_Command) ->
+  throw(unknown_command).
+
+
 
 % Create Contract Command
 % Parameters:
@@ -395,6 +419,10 @@ sell(#sell{min_price = MinPrice}) when MinPrice > ?MAX_PRICE ->
 % Possible TODOs:
 % What happens if Market doesn't exist?
 % Consider re-working using exceptions
+% Since everything occurs within a Mnesia transaction, it's possible that instead
+% of checking return values (with the nested case statements) we could just throw
+% exceptions from get_market(), get_account() etc.
+% In practice these exceptions *should* be rare.
 sell(#sell{market_name = MarketName, user = User, contract_name = ContractName,
 quantity = Quantity, min_price = MinPrice } = Command) ->
   F = fun() ->
