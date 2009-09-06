@@ -1,4 +1,3 @@
-ebin/*
 *.kpf
 Mnesia.*
 *.beam
