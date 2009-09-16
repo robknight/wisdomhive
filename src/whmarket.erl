@@ -23,10 +23,39 @@
 
 %% UTILITY FUNCTIONS %%
 
+
+floor(X) ->
+    T = trunc(X),
+    case X - T == 0 of
+        true -> T;
+        false -> T - 1
+    end.
+
+ceiling(X) ->
+    T = trunc(X),
+    case X - T == 0 of
+        true -> T;
+        false -> T + 1
+    end.
+
+
 create_tables() ->
   mnesia:create_table(market,  [{disc_copies, [node()]}, {attributes, record_info(fields, market)}]),
   mnesia:create_table(account, [{disc_copies, [node()]}, {attributes, record_info(fields, account)}]).
 
+
+mnesia_error_or(F, Or) ->
+  case mnesia:transaction(F) of
+    { aborted, { error, Error }} ->
+      { error, Error };
+    { aborted, AbortReason } ->
+      { aborted, AbortReason }; % might throwing an exception make sense here?
+    { atomic, _Val } ->
+      Or
+  end.
+  
+mnesia_error_or_ok(F) ->
+  mnesia_error_or(F, ok).
 
 get_market(Name) ->
   F = fun() ->
@@ -104,7 +133,7 @@ change_contract_quantity([C|ContractList], ContractName, Change) ->
       [C|change_contract_quantity(ContractList, ContractName, Change)]
   end;
 
-change_contract_quantity([], ContractName, Change) ->
+change_contract_quantity([], _ContractName, _Change) ->
   [].
 
 get_portfolio_entry([PE|Portfolio], MarketName, ContractName) ->
@@ -115,7 +144,7 @@ get_portfolio_entry([PE|Portfolio], MarketName, ContractName) ->
       get_portfolio_entry(Portfolio, MarketName, ContractName)
   end;
 
-get_portfolio_entry([], MarketName, ContractName) ->
+get_portfolio_entry([], _MarketName, _ContractName) ->
   [].
 
 %% TRADING  %%
@@ -133,20 +162,6 @@ add_to_portfolio(MarketName, ContractName , Quantity, [PE|Portfolio]) ->
 add_to_portfolio(MarketName, ContractName, Quantity, []) ->
   NewPE = #portfolio_entry{ market_name = MarketName, contract_name = ContractName, quantity = Quantity },
   [NewPE].
-
-floor(X) ->
-    T = trunc(X),
-    case X - T == 0 of
-        true -> T;
-        false -> T - 1
-    end.
-
-ceiling(X) ->
-    T = trunc(X),
-    case X - T == 0 of
-        true -> T;
-        false -> T + 1
-    end.
 
 
 %% PRICE CALCULATION %%
@@ -170,6 +185,7 @@ update_prices([C|T], SumPowers) ->
 update_prices([], _) ->
   [].
 
+-spec sum_powers(list()) -> any().
 sum_powers([C|T]) ->
   Quantity = C#contract.quantity,
   math:exp(Quantity/?MSR_B) + sum_powers(T);
@@ -177,6 +193,7 @@ sum_powers([C|T]) ->
 sum_powers([]) ->
   0.
 
+-spec cost_at_quantity(list(), binary(), any()) -> any().
 cost_at_quantity(ContractList, ContractName, Quantity) ->
   F = fun(C) ->
     case C#contract.name of
@@ -192,6 +209,7 @@ cost_at_quantity(ContractList, ContractName, Quantity) ->
 
 % This function calculates the cost of altering the quantity of a contract by
 % Quantity (positive for buying, negative for selling)
+-spec cost_to_trade(list(), binary(), any()) -> any().
 cost_to_trade(ContractList, ContractName, Quantity) ->
   100 * (cost_at_quantity(ContractList, ContractName, Quantity) - cost_at_quantity(ContractList, ContractName, 0)).
 
@@ -202,6 +220,7 @@ cost_to_trade(ContractList, ContractName, Quantity) ->
 % should be sold
 % WARNING: return value will not be a whole integer and should be rounded
 % accordingly by the calling function
+-spec quantity_for_price(list(), binary(), any()) -> any().
 quantity_for_price(ContractList, ContractName, Price) ->
   Contract = get_contract(ContractList, ContractName),
   Prob = Price / 100,
@@ -219,6 +238,7 @@ quantity_for_price(ContractList, ContractName, Price) ->
 
 % This function determines how many contracts can be bought for the specified
 % sum.
+-spec quantity_for_sum(list(), binary(), any()) -> any().
 quantity_for_sum(ContractList, ContractName, Sum) ->
   OldCost = cost_at_quantity(ContractList, ContractName, 0),
   N = math:exp((OldCost + (Sum / 100)) / ?MSR_B),
@@ -248,7 +268,8 @@ quantity_for_sum(ContractList, ContractName, Sum) ->
 % of the records may not be valid.  Here we are concerned only with invariants -
 % making sure that the record does not violate some "eternal" rule.
 %
-
+-spec execute(#sell{} | #buy{} | #create_contract{} | #create_account{} |
+  #open_market{} | #close_market{}) -> { error, any()} | { aborted, any() } | ok.
 execute(Command) when is_record(Command, buy) ->
   buy(Command);
 
@@ -285,7 +306,7 @@ execute(_Command) ->
 %                 Must be a string (list)
 % description     Brief description of the contract
 %                 Must be a string (list)
-
+-spec create_contract(#create_contract{}) -> { error, any()} | { aborted, any() } | ok.
 create_contract(Command) when
   not is_list(Command#create_contract.market_name);
   not is_list(Command#create_contract.contract_name);
@@ -294,10 +315,12 @@ create_contract(Command) when
     { error, badly_formed };
 
 create_contract(#create_contract{market_name = MarketName, contract_name = ContractName,
-user = User, description = Description } = Command) ->
+ description = Description } = _Command) ->
   F = fun() ->
     case get_market(MarketName) of
-      { ok, Market } ->
+      { error, Error } ->
+        mnesia:abort(Error);
+      Market ->
         case Market#market.status of
           open ->
             mnesia:abort({ error, market_is_open });
@@ -310,12 +333,10 @@ user = User, description = Description } = Command) ->
               Error ->
                 mnesia:abort(Error)
             end
-        end;
-      Error ->
-        mnesia:abort(Error)
+        end
     end
   end,
-  mnesia:transaction(F).
+  mnesia_error_or_ok(F).
 
 
 % Buy Command
@@ -331,7 +352,7 @@ user = User, description = Description } = Command) ->
 %                 Must be a string (list)
 % user            JID of the user
 %                 Must be a string (list)
-
+-spec buy(#buy{}) -> { error, any()} | { aborted, any() } | ok.
 buy(Command) when
   not is_list(Command#buy.contract_name);
   not is_list(Command#buy.market_name);
@@ -351,6 +372,7 @@ buy(#buy{max_price = MaxPrice}) when MaxPrice >= ?MAX_PRICE ->
 
 buy(#buy{market_name = MarketName, user = User, contract_name = ContractName,
 quantity = Quantity, max_price = MaxPrice } = Command) ->
+  io:format("buy command ~n~p~n", [Command]),
   F = fun() ->
     Account = get_account(User),
     Market = get_market(MarketName),
@@ -360,7 +382,7 @@ quantity = Quantity, max_price = MaxPrice } = Command) ->
         mnesia:abort(contract_does_not_exist);
       Contract when MaxPrice =< Contract#contract.price ->
         mnesia:abort(max_price_too_low);
-      Contract ->
+      _ ->
         Balance = Account#account.balance,
         AffordableMax = quantity_to_buy(ContractList, ContractName, Quantity, MaxPrice, Balance),
         if
@@ -377,8 +399,9 @@ quantity = Quantity, max_price = MaxPrice } = Command) ->
         end
     end
   end,
-  mnesia:transaction(F).
-  
+  mnesia_error_or_ok(F).
+
+-spec quantity_to_buy(list(), binary(), any(), any(), any()) -> any().
 quantity_to_buy(ContractList, ContractName, MaxQuantity, MaxPrice, Balance) ->
   QFP = floor(quantity_for_price(ContractList, ContractName, MaxPrice)),
   RealMax = if
@@ -398,7 +421,7 @@ quantity_to_buy(ContractList, ContractName, MaxQuantity, MaxPrice, Balance) ->
 % Sell Command
 % All details identical to the Buy command, except:
 % min_price instead of max_price
-
+-spec sell(#sell{}) -> { error, any()} | { aborted, any() } | ok.
 sell(Command) when
   not is_list(Command#sell.contract_name);
   not is_list(Command#sell.market_name);
@@ -424,13 +447,13 @@ sell(#sell{min_price = MinPrice}) when MinPrice > ?MAX_PRICE ->
 % exceptions from get_market(), get_account() etc.
 % In practice these exceptions *should* be rare.
 sell(#sell{market_name = MarketName, user = User, contract_name = ContractName,
-quantity = Quantity, min_price = MinPrice } = Command) ->
+quantity = Quantity, min_price = MinPrice } = _Command) ->
   F = fun() ->
     Account = get_account(User),
     Market = get_market(MarketName),
     ContractList = Market#market.contracts,
     case get_portfolio_entry(Account#account.portfolio, MarketName, ContractName) of
-      false ->
+      [] ->
         mnesia:abort(no_contracts_to_sell);
       PortfolioEntry when PortfolioEntry#portfolio_entry.quantity == 0 ->
         mnesia:abort(no_contracts_to_sell);
@@ -440,7 +463,7 @@ quantity = Quantity, min_price = MinPrice } = Command) ->
             mnesia:abort(contract_does_not_exist);
           Contract when MinPrice >= Contract#contract.price ->
             mnesia:abort(min_price_too_high);
-          Contract ->
+          _ ->
             Balance = Account#account.balance,
             SaleQuantity = 0 - quantity_to_sell(ContractList, ContractName, Quantity, MinPrice, PortfolioEntry),
             if
@@ -458,8 +481,9 @@ quantity = Quantity, min_price = MinPrice } = Command) ->
         end
     end
   end,
-  mnesia:transaction(F).
+  mnesia_error_or_ok(F).
 
+-spec quantity_to_sell(list(), binary(), any(), any(), #portfolio_entry{}) -> any().
 quantity_to_sell(ContractList, ContractName, MaxQuantity, MinPrice, PortfolioEntry) ->
   QtyToSell = if
     MaxQuantity > PortfolioEntry#portfolio_entry.quantity ->
@@ -484,13 +508,14 @@ quantity_to_sell(ContractList, ContractName, MaxQuantity, MinPrice, PortfolioEnt
 % description         Description of the market
 %                     Must be a string (list)
 
+-spec create_market(#create_market{}) -> { error, any()} | { aborted, any() } | ok.
 create_market(Command) when
   not is_list(Command#create_market.market_name);
   not is_list(Command#create_market.user);
   not is_list(Command#create_market.description) ->
     { error, badly_formed };
 
-create_market(#create_market{market_name = MarketName, user = User } = Command) ->
+create_market(#create_market{market_name = MarketName, user = User } = _Command) ->
   F = fun() ->
     case get_market(MarketName) of
       { error, market_not_found } ->
@@ -500,18 +525,19 @@ create_market(#create_market{market_name = MarketName, user = User } = Command) 
         mnesia:abort(market_already_exists)
     end
   end,
-  mnesia:transaction(F).
+  mnesia_error_or_ok(F).
   
 % Create Account Command
 % Parameters:
 % user          JID of the account owner
 %               Must be a string (list)
 
+-spec create_account(#create_account{}) -> { error, any()} | { aborted, any() } | ok.
 create_account(Command) when
   not is_list(Command#create_account.user) ->
   { error, badly_formed };
 
-create_account(#create_account{ user = Owner } = Command) ->
+create_account(#create_account{ user = Owner } = _Command) ->
   F = fun() ->
     case get_account(Owner) of
       { error, account_not_found } ->
@@ -523,7 +549,7 @@ create_account(#create_account{ user = Owner } = Command) ->
         mnesia:abort(account_already_exists)
     end
   end,
-  mnesia:transaction(F).
+  mnesia_error_or_ok(F).
   
 % Open Market Command
 % Parameters
@@ -532,6 +558,7 @@ create_account(#create_account{ user = Owner } = Command) ->
 % user                JID of the user
 %                     Must be a string (list)
 
+-spec open_market(#open_market{}) -> { error, any()} | { aborted, any() } | ok.
 open_market(Command) when
   not is_list(Command#open_market.user);
   not is_list(Command#open_market.market_name) ->
@@ -540,6 +567,7 @@ open_market(Command) when
 open_market(#open_market{ market_name = MarketName, user = User }) ->
   change_status(MarketName, User, open).
 
+-spec change_status(binary(), binary(), atom()) -> { error, any()} | { aborted, any() } | ok.
 change_status(MarketName, User, NewStatus) ->
   F = fun() ->
     case get_market(MarketName) of
@@ -554,7 +582,7 @@ change_status(MarketName, User, NewStatus) ->
         mnesia:write(NewMarket)
     end 
   end,
-  mnesia:transaction(F).
+  mnesia_error_or_ok(F).
   
 % Close Market Command
 % Parameters
@@ -563,6 +591,7 @@ change_status(MarketName, User, NewStatus) ->
 % user                JID of the user
 %                     Must be a string(list)
 
+-spec close_market(#close_market{}) -> { error, any()} | { aborted, any() } | ok.
 close_market(Command) when
   not is_list(Command#close_market.market_name);
   not is_list(Command#close_market.user) ->

@@ -7,7 +7,7 @@ all: $(BEAMS)
 
 
 ebin/%.beam: src/%.erl $(HEADERS)
-	erlc +warn_missing_spec -o ebin/ $<
+	erlc +debug_info  +warn_missing_spec -o ebin/ $<
 
 dialyzer:
 	dialyzer --src -r src/

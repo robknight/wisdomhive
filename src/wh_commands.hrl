@@ -1,4 +1,4 @@
--record(buy, { market_name, contract_name, user, quantity, max_price }).
+-record(buy, { market_name = "", contract_name = "", user = "", quantity = 0, max_price = 0 }).
 -record(sell, { market_name, contract_name, user, quantity, min_price }).
 -record(create_contract, { market_name, contract_name, user, description }).
 -record(create_market, { market_name, user, description }).
