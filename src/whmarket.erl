@@ -573,11 +573,11 @@ change_status(MarketName, User, NewStatus) ->
     case get_market(MarketName) of
       { error, Reason } ->
         mnesia:abort(Reason);
-      { ok, Market } when Market#market.creator =/= User ->
+      Market when Market#market.creator =/= User ->
         mnesia:abort({ error, no_permission });
-      { ok, Market } when Market#market.status =:= NewStatus ->
+      Market when Market#market.status =:= NewStatus ->
         mnesia:abort({ error, no_change });
-      { ok, Market } ->
+      Market ->
         NewMarket = Market#market{ status = NewStatus },
         mnesia:write(NewMarket)
     end 

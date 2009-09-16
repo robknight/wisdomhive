@@ -25,14 +25,24 @@
 	session
 	}).
   
-get_command_record(Name) ->
+-record(command_info, {
+  name, description, rec, rec_info, clean_input, clean_output
+}).
+  
+get_command_info(Name) ->
   case Name of
-    <<"buy">> -> #buy{};
-    <<"sell">> -> #sell{};
-    <<"create_market">> -> #create_market{};
-    <<"create_contract">> -> #create_contract{};
-    <<"open_market">> -> #open_market{};
-    <<"close_market">> -> #close_market{}
+    <<"buy">> -> #command_info{ name = Name, description = <<"Buy Contracts">>,
+                                rec = #buy{}, rec_info = record_info(fields, buy) };
+    <<"sell">> -> #command_info{ name = Name, description = <<"Sell Contracts">>,
+                                rec = #sell{}, rec_info = record_info(fields, sell) };
+    <<"create_market">> -> #command_info{ name = Name, description = <<"Create Market">>,
+                                rec = #create_market{}, rec_info = record_info(fields, create_market) };
+    <<"create_contract">> -> #command_info{ name = Name, description = <<"Create Contract">>,
+                                rec = #create_contract{}, rec_info = record_info(fields, create_contract) };
+    <<"open_market">> -> #command_info{ name = Name, description = <<"Open Market">>,
+                                rec = #open_market{}, rec_info = record_info(fields, open_market) };
+    <<"close_market">> -> #command_info{ name = Name, description = <<"Close Market">>,
+                                rec = #close_market{}, rec_info = record_info(fields, close_market) }
   end.
 
 -spec start_link() -> {ok, pid()}.
@@ -104,7 +114,7 @@ process_iq(Session, "get", ?NS_DISCO_ITEMS, IQ) ->
 	exmpp_component:send_packet(Session, Result);
   
 process_iq(Session, "get", ?NS_INBAND_REGISTER, IQ) ->
-  From = exmpp_jid:parse(exmpp_stanza:get_sender(IQ)),
+  %From = exmpp_jid:parse(exmpp_stanza:get_sender(IQ)),
 	Result = exmpp_iq:result(IQ),
 	exmpp_component:send_packet(Session, Result);
 
@@ -121,7 +131,8 @@ process_iq(Session, "set", ?NS_ADHOC, IQ) ->
   Node = exmpp_xml:get_attribute_as_list(XmlCommand, 'node', "none"),
   case exmpp_xml:get_element(XmlCommand, ?NS_DATA_FORMS, 'x') of
     undefined ->
-      RForm = make_form(get_command_record(list_to_binary(Node))),
+      #command_info{ rec = Record } = get_command_info(list_to_binary(Node)),
+      RForm = make_form(Record),
       	Result = exmpp_iq:result(IQ, exmpp_xml:element(?NS_ADHOC, 'command',
           [exmpp_xml:attribute('node', Node), exmpp_xml:attribute('status', <<"executing">>)], 
           [RForm])),
@@ -142,8 +153,10 @@ process_iq(Session, "set", ?NS_ADHOC, IQ) ->
           blah;
         Command ->
             case whmarket:execute(Command) of
-              badly_formed ->
+              {error, badly_formed} ->
                 io:format("badly formed command~n");
+              { error, Reason } ->
+                ok; % here we need to send an error message to the client
               ok ->
                 Result = exmpp_iq:result(IQ,  exmpp_xml:element(?NS_ADHOC, 'command',
                   [exmpp_xml:attribute('node', Node), exmpp_xml:attribute('status', <<"completed">>)],
@@ -153,7 +166,7 @@ process_iq(Session, "set", ?NS_ADHOC, IQ) ->
       end
   end;
     
-process_iq(Session, _, _, IQ) ->
+process_iq(_Session, _, _, IQ) ->
   From = exmpp_jid:parse(exmpp_stanza:get_sender(IQ)),
 	io:format("unknown IQ received from ~p:~n", [[From, exmpp_xml:get_attribute_as_binary(exmpp_iq:get_payload(IQ), 'node', <<"">>)]]),
   ok.
@@ -181,7 +194,7 @@ disco_items(?NS_ADHOC_b, IQ) ->
   Result = exmpp_xml:element(?NS_DISCO_ITEMS, 'query', [exmpp_xml:attribute('node', ?NS_ADHOC_s)], Children),
   exmpp_iq:result(IQ, Result).
   
-parse_command(XmlCommand, "buy", Fields, User) ->
+parse_command(_XmlCommand, "buy", Fields, User) ->
   try lists:foldl(
   fun( {<<"market_name">>, Value}, #buy{} = Cmd) ->
 				Cmd#buy{ market_name = Value };
@@ -198,7 +211,7 @@ parse_command(XmlCommand, "buy", Fields, User) ->
     Exception -> Exception
   end;
 
-parse_command(XmlCommand, "sell", Fields, User) ->
+parse_command(_XmlCommand, "sell", Fields, User) ->
   try lists:foldl(
   fun( {<<"market_name">>, Value}, #sell{} = Cmd) ->
 				Cmd#sell{ market_name = Value };
@@ -215,14 +228,14 @@ parse_command(XmlCommand, "sell", Fields, User) ->
     Exception -> Exception
   end;
   
-parse_command(XmlCommand, "create_contract", Fields, User) ->
+parse_command(_XmlCommand, "create_contract", Fields, User) ->
   try lists:foldl(
   fun( {<<"market_name">>, Value}, #create_contract{} = Cmd) ->
 				Cmd#create_contract{ market_name = Value };
 		  ({<<"contract_name">>, Value}, #create_contract{} = Cmd) ->
 				Cmd#create_contract{ contract_name = Value };
       ({<<"description">>, Value}, #create_contract{} = Cmd) ->
-        Cmd#create_contract{ description = description };
+        Cmd#create_contract{ description = Value };
       (_, _) ->
         throw(badly_formed)
 	end, #create_contract{ user = User }, Fields)
@@ -230,12 +243,12 @@ parse_command(XmlCommand, "create_contract", Fields, User) ->
     Exception -> Exception
   end;
   
-parse_command(XmlCommand, "create_market", Fields, User) ->
+parse_command(_XmlCommand, "create_market", Fields, User) ->
   try lists:foldl(
   fun( {<<"market_name">>, Value}, #create_market{} = Cmd) ->
 				Cmd#create_market{ market_name = Value };
       ({<<"description">>, Value}, #create_market{} = Cmd) ->
-        Cmd#create_market{ description = description };
+        Cmd#create_market{ description = Value };
       (_, _) ->
         throw(badly_formed)
 	end, #create_market{ user = User }, Fields)
@@ -243,7 +256,7 @@ parse_command(XmlCommand, "create_market", Fields, User) ->
     Exception -> Exception
   end;
 
-parse_command(XmlCommand, "open_market", Fields, User) ->
+parse_command(_XmlCommand, "open_market", Fields, User) ->
   try lists:foldl(
   fun( {<<"market_name">>, Value}, #open_market{} = Cmd) ->
 				Cmd#open_market{ market_name = Value };
@@ -254,7 +267,7 @@ parse_command(XmlCommand, "open_market", Fields, User) ->
     Exception -> Exception
   end;
   
-parse_command(XmlCommand, "close_market", Fields, User) ->
+parse_command(_XmlCommand, "close_market", Fields, User) ->
   try lists:foldl(
   fun( {<<"market_name">>, Value}, #close_market{} = Cmd) ->
 				Cmd#close_market{ market_name = Value };
@@ -274,7 +287,38 @@ make_form(#buy{} = Data) ->
   QuantityField = ?FIELD(<<"text-single">>, <<"quantity">>, <<"Quantity">>, integer_to_binary(Data#buy.quantity)),
   MaxPriceField = ?FIELD(<<"text-single">>, <<"max_price">>, <<"Maximum Price">>, integer_to_binary(Data#buy.max_price)),
   exmpp_xml:element(?NS_DATA_FORMS, 'x', [?XMLATTR(type,<<"form">>)], 
-					[MarketNameField, ContractNameField, QuantityField, MaxPriceField]).
+					[MarketNameField, ContractNameField, QuantityField, MaxPriceField]);
 
+make_form(#sell{} = Data) ->
+  MarketNameField = ?FIELD(<<"text-single">>, <<"market_name">>, <<"Market Name">>, list_to_binary(Data#sell.market_name)),
+  ContractNameField = ?FIELD(<<"text-single">>, <<"contract_name">>, <<"Contract Name">>, list_to_binary(Data#sell.contract_name)),
+  QuantityField = ?FIELD(<<"text-single">>, <<"quantity">>, <<"Quantity">>, integer_to_binary(Data#sell.quantity)),
+  MinPriceField = ?FIELD(<<"text-single">>, <<"max_price">>, <<"Minimum Price">>, integer_to_binary(Data#sell.min_price)),
+  exmpp_xml:element(?NS_DATA_FORMS, 'x', [?XMLATTR(type,<<"form">>)], 
+					[MarketNameField, ContractNameField, QuantityField, MinPriceField]);
+          
+make_form(#create_market{} = Data) ->
+  MarketNameField = ?FIELD(<<"text-single">>, <<"market_name">>, <<"Market Name">>, list_to_binary(Data#create_market.market_name)),
+  DescriptionField = ?FIELD(<<"text-single">>, <<"description">>, <<"Description">>, list_to_binary(Data#create_market.description)),
+  exmpp_xml:element(?NS_DATA_FORMS, 'x', [?XMLATTR(type,<<"form">>)], 
+					[MarketNameField, DescriptionField]);
+
+make_form(#create_contract{} = Data) ->
+  MarketNameField = ?FIELD(<<"text-single">>, <<"market_name">>, <<"Market Name">>, list_to_binary(Data#create_contract.market_name)),
+  ContractNameField = ?FIELD(<<"text-single">>, <<"contract_name">>, <<"Contract Name">>, list_to_binary(Data#create_contract.contract_name)),
+  DescriptionField = ?FIELD(<<"text-single">>, <<"description">>, <<"Description">>, list_to_binary(Data#create_contract.description)),
+  exmpp_xml:element(?NS_DATA_FORMS, 'x', [?XMLATTR(type,<<"form">>)], 
+					[MarketNameField, ContractNameField, DescriptionField]);
+
+make_form(#open_market{} = Data) ->
+  MarketNameField = ?FIELD(<<"text-single">>, <<"market_name">>, <<"Market Name">>, list_to_binary(Data#open_market.market_name)),
+  exmpp_xml:element(?NS_DATA_FORMS, 'x', [?XMLATTR(type,<<"form">>)], 
+					[MarketNameField]);
+
+make_form(#close_market{} = Data) ->
+  MarketNameField = ?FIELD(<<"text-single">>, <<"market_name">>, <<"Market Name">>, list_to_binary(Data#close_market.market_name)),
+  exmpp_xml:element(?NS_DATA_FORMS, 'x', [?XMLATTR(type,<<"form">>)], 
+					[MarketNameField]).
+          
 integer_to_binary(Int) ->
   list_to_binary(integer_to_list(Int)).
