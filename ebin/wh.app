@@ -6,12 +6,14 @@
 			wh,
   		whmarket,
   		whjson,
-  		wh_supervisor
+  		wh_supervisor,
+			wh_bot_events,
+			wh_event_manager
 	  ]},
     {registered, []},
     {mod, {wh, []}},
     {env, []},
-    {applications, [kernel, stdlib, exmpp]}
+    {applications, [kernel, stdlib, mnesia, exmpp]}
   ]
 }.
 

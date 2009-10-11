@@ -1,6 +1,6 @@
 -module(whjson).
 
--include("wh_commands.hrl").
+-include("../include/wh_commands.hrl").
 
 -compile(export_all).
 

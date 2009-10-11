@@ -11,10 +11,12 @@ start_link() ->
 -spec init(any()) -> {ok, {tuple(), [tuple()]}}.
 init([]) ->
 	BotSpec = {whbot, 
-			   {whbot, start_link, []},
-			permanent,
-			1000,
-			worker,
-			[whbot]},
+    { whbot, start_link, [] },
+			permanent, 1000, worker, [whbot]},
+      
+  EventMgrSpec = {wh_event_manager,
+    { wh_event_manager, start_link, [] },
+    permanent, 1000, worker, dynamic
+  },
 
-	{ok, {{one_for_one,1, 10}, [BotSpec]}}.
+	{ok, {{one_for_one,1, 10}, [EventMgrSpec, BotSpec]}}.

@@ -6,7 +6,8 @@
 			wh,
   		whmarket,
   		whjson,
-  		wh_supervisor
+  		wh_supervisor,
+			wh_event_manager
 	  ]},
     {registered, []},
     {mod, {wh, []}},

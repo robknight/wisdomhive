@@ -6,8 +6,13 @@
 -export([init/1, handle_event/2, handle_call/2,
          handle_info/2, terminate/2, code_change/3]).
 
-init([]) ->
+init([Session]) ->
   {ok, 500}.
+
+handle_event(Event#event {sequence = Seq, source = MarketName,
+  #trade_event{ contract_name = ContractName, quantity = Quantity}, Session) ->
+  
+  {ok, Session};
 
 handle_event(Event, State) ->
   io:format('~nEvent: ~p~n', [Event]),

@@ -6,7 +6,7 @@
 start() ->
 	ok = exmpp:start(),
   ok = mnesia:start(),
-	ok = application:start(wh_app).
+	application:start(wh_app).
 
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->

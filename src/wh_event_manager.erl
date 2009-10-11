@@ -70,9 +70,9 @@ process_events([Event|T]) ->
 process_events([]) ->
   [].
 
--spec add_handler(atom()) -> ok | {'EXIT', term()} | term().
-add_handler(Module) ->
-  gen_event:add_handler(?EVT_MGR, Module, []).
+-spec add_handler(atom(), [any()]) -> ok | {'EXIT', term()} | term().
+add_handler(Module, Args) ->
+  gen_event:add_handler(?EVT_MGR, Module, Args).
 
 -spec notify(wh_event()) -> ok.
 notify(Event) ->

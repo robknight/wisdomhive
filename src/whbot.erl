@@ -11,9 +11,10 @@
 -include_lib("exmpp/include/exmpp_xml.hrl").
 -include_lib("exmpp/include/exmpp_nss.hrl").
 
--include("wh_commands.hrl").
--include("whrecords.hrl").
--include("whbot.hrl").
+-include("../include/wh_commands.hrl").
+-include("../include/wh_events.hrl").
+-include("../include/whrecords.hrl").
+-include("../include/whbot.hrl").
 
 -define(COMPONENT, "market.whtest.local").
 -define(SERVER_HOST, "localhost").
@@ -26,7 +27,7 @@
 	}).
   
 -record(command_info, {
-  name, description, rec, rec_info, clean_input, clean_output
+  name, description, rec, rec_info
 }).
   
 get_command_info(Name) ->
@@ -59,6 +60,7 @@ init([]) ->
 	exmpp_component:auth(Session, ?COMPONENT, ?SECRET),
 	_StreamId = exmpp_component:connect(Session, ?SERVER_HOST, ?SERVER_PORT),
 	ok = exmpp_component:handshake(Session),
+  wh_event_manager:add_handler(wh_bot_events, [Session]),
 	{ok, #state{session = Session}}.
 
 -spec handle_call(any(), any(), #state{}) -> {reply, any(), #state{}} | {noreply, #state{}}.
@@ -91,25 +93,27 @@ code_change(_OldVsn, State, _Extra) ->
 
 process_received_packet(Session, #received_packet{packet_type = 'iq', type_attr=Type, raw_packet = IQ}) ->
 	process_iq(Session, Type, exmpp_xml:get_ns_as_atom(exmpp_iq:get_payload(IQ)), IQ);
+  
+process_received_packet(Session, #received_packet{packet_type = 'presence', type_attr = Type, raw_packet = Presence, from = From}) ->
+  process_presence(Session, Type, Presence, From);
 
 process_received_packet(_Session, Packet) ->
 	io:format("Unknown packet: ~p\n", [Packet]).
 
+process_presence(Session, "subscribe", Presence, From) ->
+  Subscribed1 = exmpp_xml:set_attribute(exmpp_presence:subscribed(), to, From),
+  exmpp_session:send_packet(Session, Subscribed1);
+
+process_presence(_Session, _Type, _Presence, _From) ->
+  ok.
 
 process_iq(Session, "get", ?NS_DISCO_INFO, IQ) ->
-	Identity = exmpp_xml:element(?NS_DISCO_INFO, 'identity', [exmpp_xml:attribute("category", <<"component">>),
-				  		      exmpp_xml:attribute("type", <<"market">>),
-						      exmpp_xml:attribute("name", <<"WH Market">>)
-						      ], 
-			 	     []),
-	IQRegisterFeature = exmpp_xml:element(?NS_DISCO_INFO, 'feature', [exmpp_xml:attribute('var', ?NS_INBAND_REGISTER_s)],[]),
-	CommandsFeature = exmpp_xml:element(?NS_DISCO_INFO, 'feature', [exmpp_xml:attribute('var', ?NS_ADHOC_s)], []),
-  
-	Result = exmpp_iq:result(IQ, exmpp_xml:element(?NS_DISCO_INFO, 'query', [], [Identity, IQRegisterFeature, CommandsFeature])),
+  Node = exmpp_xml:get_attribute_as_binary(exmpp_iq:get_payload(IQ), 'node', <<"">>),
+	Result = disco_info(Node, IQ),
 	exmpp_component:send_packet(Session, Result);
 
 process_iq(Session, "get", ?NS_DISCO_ITEMS, IQ) ->
-  Node = exmpp_xml:get_attribute_as_binary(exmpp_iq:get_payload(IQ), 'node', ""),
+  Node = exmpp_xml:get_attribute_as_binary(exmpp_iq:get_payload(IQ), 'node', <<"">>),
 	Result = disco_items(Node, IQ),
 	exmpp_component:send_packet(Session, Result);
   
@@ -156,7 +160,7 @@ process_iq(Session, "set", ?NS_ADHOC, IQ) ->
               {error, badly_formed} ->
                 io:format("badly formed command~n");
               { error, Reason } ->
-                ok; % here we need to send an error message to the client
+                ok; % TODO: here we need to send an error message to the client
               ok ->
                 Result = exmpp_iq:result(IQ,  exmpp_xml:element(?NS_ADHOC, 'command',
                   [exmpp_xml:attribute('node', Node), exmpp_xml:attribute('status', <<"completed">>)],
@@ -173,9 +177,6 @@ process_iq(_Session, _, _, IQ) ->
   
   
  
-disco_items(<<"">>, IQ) ->
-	exmpp_iq:result(IQ);
-
 disco_items(?NS_ADHOC_b, IQ) ->
   Commands = [{<<"buy">>, <<"Buy Contracts">>}, {<<"sell">>, <<"Sell Contracts">> },
               {<<"create_contract">>, <<"Create Contract">> },
@@ -192,7 +193,26 @@ disco_items(?NS_ADHOC_b, IQ) ->
 		   } || { Node, Name } <- Commands
 	],
   Result = exmpp_xml:element(?NS_DISCO_ITEMS, 'query', [exmpp_xml:attribute('node', ?NS_ADHOC_s)], Children),
+  exmpp_iq:result(IQ, Result);
+  
+disco_items(<<"">>, IQ) ->
+  Result = exmpp_xml:element(?NS_DISCO_ITEMS, 'query', [], []),
   exmpp_iq:result(IQ, Result).
+
+disco_info(<<"">>, IQ) ->
+	Identity = exmpp_xml:element(?NS_DISCO_INFO, 'identity', [exmpp_xml:attribute("category", <<"component">>),
+				  		      exmpp_xml:attribute("type", <<"generic">>),
+						      exmpp_xml:attribute("name", <<"WH Market">>)
+						      ], 
+			 	     []),
+	IQRegisterFeature = exmpp_xml:element(?NS_DISCO_INFO, 'feature', [exmpp_xml:attribute('var', ?NS_INBAND_REGISTER_s)],[]),
+	CommandsFeature = exmpp_xml:element(?NS_DISCO_INFO, 'feature', [exmpp_xml:attribute('var', ?NS_ADHOC_s)], []),
+ % PubSubFeature = exmpp_xml:element(?NS_DISCO_INFO, 'feature', [exmpp_xml:attribute('var', ?NS_PUBSUB_s)], []),
+  
+	exmpp_iq:result(IQ, exmpp_xml:element(?NS_DISCO_INFO, 'query', [],
+    [Identity, IQRegisterFeature, CommandsFeature])).
+ 
+
   
 parse_command(_XmlCommand, "buy", Fields, User) ->
   try lists:foldl(

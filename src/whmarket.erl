@@ -1,7 +1,8 @@
 -module(whmarket).
 
--include("whrecords.hrl").
--include("wh_commands.hrl").
+-include("../include/whrecords.hrl").
+-include("../include/wh_commands.hrl").
+-include("../include/wh_events.hrl").
 
 -compile(export_all).
 
@@ -20,6 +21,9 @@
        
 -export([create_tables/0]).
        
+
+start() ->
+  wh_event_manager:start_link().
 
 %% UTILITY FUNCTIONS %%
 
@@ -41,8 +45,8 @@ ceiling(X) ->
 
 create_tables() ->
   mnesia:create_table(market,  [{disc_copies, [node()]}, {attributes, record_info(fields, market)}]),
-  mnesia:create_table(account, [{disc_copies, [node()]}, {attributes, record_info(fields, account)}]).
-
+  mnesia:create_table(account, [{disc_copies, [node()]}, {attributes, record_info(fields, account)}]),
+  mnesia:create_table(event,  [{disc_copies, [node()]}, {type, ordered_set}, {attributes, record_info(fields, event)}]).
 
 mnesia_error_or(F, Or) ->
   case mnesia:transaction(F) of
@@ -56,6 +60,18 @@ mnesia_error_or(F, Or) ->
   
 mnesia_error_or_ok(F) ->
   mnesia_error_or(F, ok).
+
+get_all_markets() ->
+  F = fun() ->
+    Pattern = #market{_ = '_'},
+    mnesia:match_object(Pattern)
+  end,
+  case mnesia:transaction(F) of
+    { atomic, Val } ->
+      Val;
+    { aborted, Reason } ->
+      { error, Reason}
+  end.
 
 get_market(Name) ->
   F = fun() ->
@@ -260,40 +276,67 @@ quantity_for_sum(ContractList, ContractName, Sum) ->
 
 %% COMMANDS %%
 
-% All commands are forwarded to the gen_server process for the market in
-% question.
-
-% At this stage, we can expect that all of the inputs will be well-formed
-% records, with all of the required fields present.  However, they contents
-% of the records may not be valid.  Here we are concerned only with invariants -
-% making sure that the record does not violate some "eternal" rule.
+% There is a slight problem here.  What happens at present is this:
+% All commands are received via execute/1.  If the command succeeds, the
+% command is broadcast as an event which, amongst other things, will be logged.
+% However, two problems exist:
 %
--spec execute(#sell{} | #buy{} | #create_contract{} | #create_account{} |
-  #open_market{} | #close_market{}) -> { error, any()} | { aborted, any() } | ok.
-execute(Command) when is_record(Command, buy) ->
+% 1) The resulting log of commands might not accurately reflect the order in
+% which the events were processed, due to race conditions.  Perhaps the event
+% could be raised from within the mnesia transaction?
+% 2) We really want to record the *outcome* of the command rather than [just]
+% the command itself.  Full details of the command are probably necessary to
+% give context to the event, but when we're broadcasting to somewhat dumb event
+% recipients, we just want to tell them 'X happened', not 'here are the details
+% of what we just did, you figure out what happened as a result'.  Perhaps each
+% command should return an event record?  For example, a 'buy' command might not
+% specifies maximum prices and maximum numbers of contracts to buy, but those
+% not always going to be the actual price paid or quantity bought - we want to
+% record those as well.
+% POSSIBLE SOLUTION: write to an event log from within the mnesia transaction,
+% and after each command either read from the log or notify another process to
+% do so.  The event log will always be in the correct order.
+
+-spec event(wh_event(), any()) -> ok.
+event(Event, Source) ->
+  wh_event_manager:log_event(Event, Source).
+
+execute(Command) ->
+  Result = dispatch(Command),
+  case Result of
+    { error, _ } ->
+      Result;
+    { aborted, _ } ->
+      Result;
+    _ ->
+      wh_event_manager:update(),
+      Result
+  end.
+
+-spec dispatch(wh_command()) -> { error, any()} | { aborted, any() } | ok.
+dispatch(Command=#buy{}) ->
   buy(Command);
 
-execute(Command) when is_record(Command, sell) ->
+dispatch(Command=#sell{}) ->
   sell(Command);
   
-execute(Command) when is_record(Command, create_contract) ->
+dispatch(Command=#create_contract{}) ->
   create_contract(Command);
 
-execute(Command) when is_record(Command, create_market) ->
+dispatch(Command=#create_market{}) ->
   create_market(Command);
 
-execute(Command) when is_record(Command, create_account) ->
+dispatch(Command=#create_account{}) ->
   create_account(Command);
 
-execute(Command) when is_record(Command, open_market) ->
+dispatch(Command=#open_market{}) ->
   open_market(Command);
   
-execute(Command) when is_record(Command, close_market) ->
+dispatch(Command=#close_market{}) ->
   close_market(Command);
   
-execute(_Command) ->
+dispatch(_Command) ->
   throw(unknown_command).
-
 
 
 % Create Contract Command
@@ -329,7 +372,8 @@ create_contract(#create_contract{market_name = MarketName, contract_name = Contr
             case add_contract(Market#market.contracts, Contract) of
               { ok, NewContractList } ->
                 NewMarket = Market#market { contracts = NewContractList },
-                mnesia:write(NewMarket);
+                mnesia:write(NewMarket),
+                event(#create_contract_event{ name = ContractName, description = Description }, { market, MarketName });
               Error ->
                 mnesia:abort(Error)
             end
@@ -352,6 +396,7 @@ create_contract(#create_contract{market_name = MarketName, contract_name = Contr
 %                 Must be a string (list)
 % user            JID of the user
 %                 Must be a string (list)
+
 -spec buy(#buy{}) -> { error, any()} | { aborted, any() } | ok.
 buy(Command) when
   not is_list(Command#buy.contract_name);
@@ -371,8 +416,7 @@ buy(#buy{max_price = MaxPrice}) when MaxPrice >= ?MAX_PRICE ->
   { error, max_price_too_high };
 
 buy(#buy{market_name = MarketName, user = User, contract_name = ContractName,
-quantity = Quantity, max_price = MaxPrice } = Command) ->
-  io:format("buy command ~n~p~n", [Command]),
+quantity = Quantity, max_price = MaxPrice }) ->
   F = fun() ->
     Account = get_account(User),
     Market = get_market(MarketName),
@@ -395,7 +439,9 @@ quantity = Quantity, max_price = MaxPrice } = Command) ->
             NewContractList = update_prices(change_contract_quantity(Market#market.contracts, ContractName, AffordableMax)),
             NewMarket = Market#market{ contracts = NewContractList },
             mnesia:write(NewAccount),
-            mnesia:write(NewMarket)
+            mnesia:write(NewMarket),
+            event(#trade_event{quantity = AffordableMax, contract_name = ContractName}, { market, MarketName }),
+            event(#balance_change_event{amount = -Cost}, {user, User})
         end
     end
   end,
@@ -476,7 +522,9 @@ quantity = Quantity, min_price = MinPrice } = _Command) ->
                 NewContractList = update_prices(change_contract_quantity(Market#market.contracts, ContractName, SaleQuantity)),
                 NewMarket = Market#market{ contracts = NewContractList },
                 mnesia:write(NewAccount),
-                mnesia:write(NewMarket)
+                mnesia:write(NewMarket),
+                event(#trade_event{quantity = SaleQuantity, contract_name = ContractName}, { market, MarketName }),
+                event(#balance_change_event{amount = Revenue}, {user, User})
             end
         end
     end
@@ -520,7 +568,8 @@ create_market(#create_market{market_name = MarketName, user = User } = _Command)
     case get_market(MarketName) of
       { error, market_not_found } ->
         Market = #market{ name = MarketName, created_date = erlang:now(), creator = User },
-        mnesia:write(Market);
+        mnesia:write(Market),
+        event(#create_market_event{ user = User }, { market, MarketName });
       _ ->
         mnesia:abort(market_already_exists)
     end
@@ -579,7 +628,8 @@ change_status(MarketName, User, NewStatus) ->
         mnesia:abort({ error, no_change });
       Market ->
         NewMarket = Market#market{ status = NewStatus },
-        mnesia:write(NewMarket)
+        mnesia:write(NewMarket),
+        event(#market_status_event{ status = NewStatus }, {market, MarketName})
     end 
   end,
   mnesia_error_or_ok(F).
